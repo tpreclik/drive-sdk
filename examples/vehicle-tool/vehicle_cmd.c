@@ -87,6 +87,12 @@ static int opt_mtu = 0;
 static int start;
 static int end;
 
+typedef struct anki_location_table_entry {
+    float dist, x, y;
+    int lane;
+} anki_location_table_entry_t;
+
+static anki_location_table_entry_t location_table[2][256][256];
 
 typedef struct anki_vehicle {
     struct gatt_char read_char;
@@ -169,6 +175,20 @@ static void handle_vehicle_msg_response(const uint8_t *data, uint16_t len)
 
                     break;
         }
+        case ANKI_VEHICLE_MSG_V2C_LOCALIZATION_POSITION_UPDATE:
+        {
+                const anki_vehicle_msg_localization_position_update_t *m = (const anki_vehicle_msg_localization_position_update_t *)msg;
+                uint8_t clockwise = (m->parsing_flags & PARSEFLAGS_MASK_NUM_BITS) != 0x00 ? 0x01 : 0x00;
+                const anki_location_table_entry_t *l = &location_table[clockwise][m->road_piece_id][m->location_id];
+
+                if (l->lane >= 0)
+                        rl_printf("Vehicle is driving in %s direction on lane %d at longitudinal position %f mm and cartesian position (%f mm, %f mm).\n", clockwise != 0x00 ? "clockwise" : "counter-clockwise", l->lane, l->dist, l->x, l->y);
+                else
+                        rl_printf("Vehicle is driving in %s direction on an unknown road piece with id %d and read an unknown location barcode with id %d.\n", clockwise != 0x00 ? "clockwise" : "counter-clockwise", m->road_piece_id, m->location_id);
+
+                break;
+        }
+
         default:
                     // rl_printf("Received unhandled vehicle message of type 0x%02x\n", msg->msg_id);
                     break;
@@ -415,6 +435,60 @@ static void cmd_anki_vehicle_read(int argcp, char **argvp)
 	}
 
 	gatt_read_char(attrib, handle, char_read_cb, attrib);
+}
+
+static void clear_location_table()
+{
+	int road_piece_id, location_id;
+	for (road_piece_id = 0; road_piece_id < 256; ++road_piece_id) {
+		for (location_id = 0; location_id < 256; ++location_id) {
+			location_table[0][road_piece_id][location_id].lane = -1;
+			location_table[1][road_piece_id][location_id].lane = -1;
+		}
+	}
+}
+
+static void cmd_clear_location_table(int argcp, char **argvp)
+{
+	if (argcp != 1) {
+		error("No arguments expected.\n");
+		return;
+	}
+
+	clear_location_table();
+}
+
+static void cmd_load_location_table(int argcp, char **argvp)
+{
+	if (argcp != 2) {
+		error("Expected one argument specifying the file containing the location table in CSV format to load.\n");
+		return;
+	}
+
+	FILE *fin = fopen(argvp[1], "r");
+	if (!fin) {
+		error("Cannot open given file.\n");
+		return;
+	}
+
+	int clockwise, road_piece_id, location_id, lane, number_of_entries = 0;
+	float x, y, dist;
+	while (fscanf(fin, "%d %d %d %f %f %d %f", &clockwise, &road_piece_id, &location_id, &x, &y, &lane, &dist) == 7)
+	{
+		if (clockwise < 0 || clockwise > 1 || road_piece_id < 0 || road_piece_id >= 256 || location_id < 0 || location_id >= 256)
+		{
+			error("Invalid location table entry encountered.\n");
+			continue;
+		}
+
+		location_table[clockwise][road_piece_id][location_id].x = x;
+		location_table[clockwise][road_piece_id][location_id].y = y;
+		location_table[clockwise][road_piece_id][location_id].lane = lane;
+		location_table[clockwise][road_piece_id][location_id].dist = dist;
+		++number_of_entries;
+	}
+
+	rl_printf("Successfully imported %d location tables entries.\n", number_of_entries);
 }
 
 static void char_write_req_cb(guint8 status, const guint8 *pdu, guint16 plen,
@@ -931,6 +1005,8 @@ static struct {
 		"Write data to vehicle (No response)" },
 	{ "read-data",	cmd_anki_vehicle_read,	"",
 		"Read last message from vehicle" },
+	{ "clear-location-table",	cmd_clear_location_table,	"",	"Clear all location table entries." },
+	{ "load-location-table",	cmd_load_location_table,	"<file containing a location table in CSV format>",	"Load location table entries from the given file." },
 	{ NULL, NULL, NULL}
 };
 
@@ -1118,6 +1194,8 @@ int interactive(const char *src, const char *dst,
 {
 	guint input;
 	guint signal;
+
+	clear_location_table();
 
 	opt_sec_level = g_strdup("low");
 
