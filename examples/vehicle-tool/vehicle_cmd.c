@@ -178,7 +178,7 @@ static void handle_vehicle_msg_response(const uint8_t *data, uint16_t len)
         case ANKI_VEHICLE_MSG_V2C_LOCALIZATION_POSITION_UPDATE:
         {
                 const anki_vehicle_msg_localization_position_update_t *m = (const anki_vehicle_msg_localization_position_update_t *)msg;
-                uint8_t clockwise = (m->parsing_flags & PARSEFLAGS_MASK_NUM_BITS) != 0x00 ? 0x01 : 0x00;
+                uint8_t clockwise = (m->parsing_flags & PARSEFLAGS_MASK_REVERSE_PARSING) != 0x00 ? 0x01 : 0x00;
                 const anki_location_table_entry_t *l = &location_table[clockwise][m->road_piece_id][m->location_id];
 
                 if (l->lane >= 0)
