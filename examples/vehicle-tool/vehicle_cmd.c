@@ -59,6 +59,7 @@
 #include <signal.h>
 #include <sys/signalfd.h>
 #include <glib.h>
+#include <inttypes.h>
 
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -93,6 +94,14 @@ typedef struct anki_location_table_entry {
 } anki_location_table_entry_t;
 
 static anki_location_table_entry_t location_table[2][256][256];
+
+typedef struct anki_road_piece_scan_entry {
+    uint8_t road_piece_id;
+    uint8_t clockwise;
+} anki_road_piece_scan_entry_t;
+
+static anki_road_piece_scan_entry_t road_piece_scan[256];
+static int road_piece_scan_head_index = 0;
 
 typedef struct anki_vehicle {
     struct gatt_char read_char;
@@ -180,6 +189,13 @@ static void handle_vehicle_msg_response(const uint8_t *data, uint16_t len)
                 const anki_vehicle_msg_localization_position_update_t *m = (const anki_vehicle_msg_localization_position_update_t *)msg;
                 uint8_t clockwise = (m->parsing_flags & PARSEFLAGS_MASK_REVERSE_PARSING) != 0x00 ? 0x01 : 0x00;
                 const anki_location_table_entry_t *l = &location_table[clockwise][m->road_piece_id][m->location_id];
+
+                if (road_piece_scan[road_piece_scan_head_index].road_piece_id != m->road_piece_id || road_piece_scan[road_piece_scan_head_index].clockwise != clockwise)
+                {
+                    road_piece_scan_head_index = (road_piece_scan_head_index + 1) % (sizeof(road_piece_scan) / sizeof(anki_road_piece_scan_entry_t));
+                    road_piece_scan[road_piece_scan_head_index].road_piece_id = m->road_piece_id;
+                    road_piece_scan[road_piece_scan_head_index].clockwise = clockwise;
+                }
 
                 if (l->lane >= 0)
                         rl_printf("Vehicle is driving in %s direction on lane %d at longitudinal position %f mm and cartesian position (%f mm, %f mm).\n", clockwise != 0x00 ? "clockwise" : "counter-clockwise", l->lane, l->dist, l->x, l->y);
@@ -489,6 +505,69 @@ static void cmd_load_location_table(int argcp, char **argvp)
 	}
 
 	rl_printf("Successfully imported %d location tables entries.\n", number_of_entries);
+}
+
+static void cmd_export_track(int argcp, char **argvp)
+{
+	if (argcp != 1) {
+		error("No arguments expected.\n");
+		return;
+	}
+
+	int n = sizeof(road_piece_scan) / sizeof(anki_road_piece_scan_entry_t);
+	int i = road_piece_scan_head_index;
+	int scan_end = -1;
+	do {
+		if (road_piece_scan[i].road_piece_id == 0x22)
+		{
+			scan_end = i;
+			break;
+		}
+
+		i = (i - 1 + n) % n;
+	} while (i != road_piece_scan_head_index);
+
+	if (scan_end == -1)
+	{
+		rl_printf("Error: No Overdrive tile containing the finish line found on record.\n");
+		return;
+	}
+
+	i = (i - 1 + n) % n;
+
+	int scan_start = -1;
+	while (i != road_piece_scan_head_index) {
+		if (road_piece_scan[i].road_piece_id == 0x22)
+		{
+			scan_start = i;
+			break;
+		}
+
+		i = (i - 1 + n) % n;
+	}
+
+	if (scan_start == -1)
+	{
+		rl_printf("Error: Overdrive tile containing the finish line found only once on record.\n");
+		return;
+	}
+
+	rl_printf("Track description:\n");
+
+	if (road_piece_scan[scan_start].clockwise)
+	{
+		for (int j = scan_end; j != scan_start; j = (j - 1 + n) % n)
+		{
+			rl_printf("%" PRId8 " %s\n", road_piece_scan[j].road_piece_id, road_piece_scan[j].clockwise ? "ccw" : "cw");
+		}
+	}
+	else
+	{
+		for (int j = scan_start; j != scan_end; j = (j + 1) % n)
+		{
+			rl_printf("%" PRId8 " %s\n", road_piece_scan[j].road_piece_id, road_piece_scan[j].clockwise ? "cw" : "ccw");
+		}
+	}
 }
 
 static void char_write_req_cb(guint8 status, const guint8 *pdu, guint16 plen,
@@ -1007,6 +1086,7 @@ static struct {
 		"Read last message from vehicle" },
 	{ "clear-location-table",	cmd_clear_location_table,	"",	"Clear all location table entries." },
 	{ "load-location-table",	cmd_load_location_table,	"<file containing a location table in CSV format>",	"Load location table entries from the given file." },
+	{ "export-track",	cmd_export_track,	"", "Exports the scanned track such that it can be imported into tragediy." },
 	{ NULL, NULL, NULL}
 };
 
@@ -1196,6 +1276,7 @@ int interactive(const char *src, const char *dst,
 	guint signal;
 
 	clear_location_table();
+	memset(road_piece_scan, 0, sizeof(road_piece_scan));
 
 	opt_sec_level = g_strdup("low");
 
