@@ -91,13 +91,14 @@ static int end;
 typedef struct anki_location_table_entry {
     float dist, x, y;
     int lane;
+    int backward;
 } anki_location_table_entry_t;
 
-static anki_location_table_entry_t location_table[2][256][256];
+static anki_location_table_entry_t location_table[2][8][256][256];
 
 typedef struct anki_road_piece_scan_entry {
     uint8_t road_piece_id;
-    uint8_t clockwise;
+    uint8_t reverse;
     uint8_t numbits;
 } anki_road_piece_scan_entry_t;
 
@@ -188,26 +189,28 @@ static void handle_vehicle_msg_response(const uint8_t *data, uint16_t len)
         case ANKI_VEHICLE_MSG_V2C_LOCALIZATION_POSITION_UPDATE:
         {
                 const anki_vehicle_msg_localization_position_update_t *m = (const anki_vehicle_msg_localization_position_update_t *)msg;
-                uint8_t clockwise = (m->parsing_flags & PARSEFLAGS_MASK_REVERSE_PARSING) != 0x00 ? 0x01 : 0x00;
+                uint8_t reverse = (m->parsing_flags & PARSEFLAGS_MASK_REVERSE_PARSING) != 0x00 ? 0x01 : 0x00;
                 uint8_t numbits = (m->parsing_flags & PARSEFLAGS_MASK_NUM_BITS);
-                const anki_location_table_entry_t *l = &location_table[clockwise][m->road_piece_id][m->location_id];
+                if (numbits == 0 || numbits > 8)
+                    break;
+                const anki_location_table_entry_t *l = &location_table[reverse][numbits - 1][m->road_piece_id][m->location_id];
 
                 // Workaround to properly export intersections.
-                if (m->road_piece_id == 10 && clockwise == 1)
-                    clockwise = 0;
+                if (m->road_piece_id == 10 && reverse == 1)
+                    reverse = 0;
 
-                if (road_piece_scan[road_piece_scan_head_index].road_piece_id != m->road_piece_id || road_piece_scan[road_piece_scan_head_index].clockwise != clockwise)
+                if (road_piece_scan[road_piece_scan_head_index].road_piece_id != m->road_piece_id || road_piece_scan[road_piece_scan_head_index].reverse != reverse)
                 {
                     road_piece_scan_head_index = (road_piece_scan_head_index + 1) % (sizeof(road_piece_scan) / sizeof(anki_road_piece_scan_entry_t));
                     road_piece_scan[road_piece_scan_head_index].road_piece_id = m->road_piece_id;
-                    road_piece_scan[road_piece_scan_head_index].clockwise = clockwise;
+                    road_piece_scan[road_piece_scan_head_index].reverse = reverse;
                     road_piece_scan[road_piece_scan_head_index].numbits = numbits;
                 }
 
                 if (l->lane >= 0)
-                        rl_printf("Vehicle is driving in %s direction on lane %d at longitudinal position %f mm and cartesian position (%f mm, %f mm).\n", clockwise != 0x00 ? "clockwise" : "counter-clockwise", l->lane, l->dist, l->x, l->y);
+                        rl_printf("Vehicle is driving in %s direction on lane %d at longitudinal position %f mm and cartesian position (%f mm, %f mm).\n", l->backward != 0 ? "backward" : "forward", l->lane, l->dist, l->x, l->y);
                 else
-                        rl_printf("Vehicle is driving in %s direction on an unknown road piece with id %d and read an unknown location barcode with id %d.\n", clockwise != 0x00 ? "clockwise" : "counter-clockwise", m->road_piece_id, m->location_id);
+                        rl_printf("Vehicle is driving on an unknown %s road piece with id %d and read an unknown location barcode with id %d.\n", reverse != 0x00 ? "reversed" : "non-reversed", m->road_piece_id, m->location_id);
 
                 break;
         }
@@ -462,11 +465,13 @@ static void cmd_anki_vehicle_read(int argcp, char **argvp)
 
 static void clear_location_table()
 {
-	int road_piece_id, location_id;
-	for (road_piece_id = 0; road_piece_id < 256; ++road_piece_id) {
-		for (location_id = 0; location_id < 256; ++location_id) {
-			location_table[0][road_piece_id][location_id].lane = -1;
-			location_table[1][road_piece_id][location_id].lane = -1;
+	int numbits, road_piece_id, location_id;
+	for (numbits = 1; numbits <= 8; ++numbits) {
+		for (road_piece_id = 0; road_piece_id < 256; ++road_piece_id) {
+			for (location_id = 0; location_id < 256; ++location_id) {
+				location_table[0][numbits - 1][road_piece_id][location_id].lane = -1;
+				location_table[1][numbits - 1][road_piece_id][location_id].lane = -1;
+			}
 		}
 	}
 }
@@ -494,20 +499,21 @@ static void cmd_load_location_table(int argcp, char **argvp)
 		return;
 	}
 
-	int clockwise, road_piece_id, location_id, lane, number_of_entries = 0;
+	int reverse, numbits, road_piece_id, location_id, lane, backward, number_of_entries = 0;
 	float x, y, dist;
-	while (fscanf(fin, "%d %d %d %f %f %d %f", &clockwise, &road_piece_id, &location_id, &x, &y, &lane, &dist) == 7)
+	while (fscanf(fin, "%d %d %d %d %f %f %d %f %d", &reverse, &numbits, &road_piece_id, &location_id, &x, &y, &lane, &dist, &backward) == 9)
 	{
-		if (clockwise < 0 || clockwise > 1 || road_piece_id < 0 || road_piece_id >= 256 || location_id < 0 || location_id >= 256)
+		if (reverse < 0 || reverse > 1 || numbits <= 0 || numbits > 8 || road_piece_id < 0 || road_piece_id >= 256 || location_id < 0 || location_id >= 256 || backward < 0 || backward > 1)
 		{
 			error("Invalid location table entry encountered.\n");
 			continue;
 		}
 
-		location_table[clockwise][road_piece_id][location_id].x = x;
-		location_table[clockwise][road_piece_id][location_id].y = y;
-		location_table[clockwise][road_piece_id][location_id].lane = lane;
-		location_table[clockwise][road_piece_id][location_id].dist = dist;
+		location_table[reverse][numbits - 1][road_piece_id][location_id].x = x;
+		location_table[reverse][numbits - 1][road_piece_id][location_id].y = y;
+		location_table[reverse][numbits - 1][road_piece_id][location_id].lane = lane;
+		location_table[reverse][numbits - 1][road_piece_id][location_id].dist = dist;
+		location_table[reverse][numbits - 1][road_piece_id][location_id].backward = backward;
 		++number_of_entries;
 	}
 
@@ -516,8 +522,14 @@ static void cmd_load_location_table(int argcp, char **argvp)
 
 static void cmd_export_track(int argcp, char **argvp)
 {
-	if (argcp != 1) {
-		error("No arguments expected.\n");
+	if (argcp != 2) {
+		error("Expected one argument specifying the file to write to.\n");
+		return;
+	}
+
+	FILE *fout = fopen(argvp[1], "w");
+	if (!fout) {
+		error("Cannot open given file.\n");
 		return;
 	}
 
@@ -536,6 +548,7 @@ static void cmd_export_track(int argcp, char **argvp)
 
 	if (scan_end == -1)
 	{
+		fclose(fout);
 		rl_printf("Error: No Overdrive tile containing the finish line found on record.\n");
 		return;
 	}
@@ -555,57 +568,60 @@ static void cmd_export_track(int argcp, char **argvp)
 
 	if (scan_start == -1)
 	{
+		fclose(fout);
 		rl_printf("Error: Overdrive tile containing the finish line found only once on record.\n");
 		return;
 	}
 
-	rl_printf("Track description:\n");
-
 	int numRoadPieces = scan_end < scan_start ? scan_end + n - scan_start : scan_end - scan_start;
 
 	// Road pieces.
-	rl_printf("%d\n", numRoadPieces);
-	if (road_piece_scan[scan_start].clockwise)
+	fprintf(fout, "%d\n", numRoadPieces);
+	if (road_piece_scan[scan_start].reverse)
 	{
 		for (int j = scan_end; j != scan_start; j = (j - 1 + n) % n)
 		{
-			rl_printf("0 %" PRId8 " %" PRId8 " 1000 %d\n", road_piece_scan[j].numbits, road_piece_scan[j].road_piece_id, road_piece_scan[j].clockwise ? 0 : 1);
+			fprintf(fout, "0 %" PRId8 " %" PRId8 " 1000 %d\n", road_piece_scan[j].numbits, road_piece_scan[j].road_piece_id, road_piece_scan[j].reverse ? 0 : 1);
 		}
 	}
 	else
 	{
 		for (int j = scan_start; j != scan_end; j = (j + 1) % n)
 		{
-			rl_printf("0 %" PRId8 " %" PRId8 " 1000 %d\n", road_piece_scan[j].numbits, road_piece_scan[j].road_piece_id, road_piece_scan[j].clockwise ? 1 : 0);
+			fprintf(fout, "0 %" PRId8 " %" PRId8 " 1000 %d\n", road_piece_scan[j].numbits, road_piece_scan[j].road_piece_id, road_piece_scan[j].reverse ? 1 : 0);
 		}
 	}
 
 	// Connections.
-	rl_printf("%d\n", numRoadPieces);
-	if (road_piece_scan[scan_start].clockwise)
+	fprintf(fout, "%d\n", numRoadPieces);
+	if (road_piece_scan[scan_start].reverse)
 	{
 		for (int j = scan_end, k = 0; j != scan_start; j = (j - 1 + n) % n, ++k)
 		{
-			int cw = road_piece_scan[j].clockwise ? 0 : 1;
-			int cw_next = road_piece_scan[(j - 1 + n) % n].clockwise ? 0 : 1;
-			rl_printf("%d %d %d %d\n", k, 1 - cw, (k + 1) % numRoadPieces, cw_next);
+			int reverse = road_piece_scan[j].reverse ? 0 : 1;
+			int reverse_next = road_piece_scan[(j - 1 + n) % n].reverse ? 0 : 1;
+			fprintf(fout, "%d %d %d %d\n", k, 1 - reverse, (k + 1) % numRoadPieces, reverse_next);
 		}
 	}
 	else
 	{
 		for (int j = scan_start, k = 0; j != scan_end; j = (j + 1) % n, ++k)
 		{
-			int cw = road_piece_scan[j].clockwise ? 1 : 0;
-			int cw_next = road_piece_scan[(j + 1) % n].clockwise ? 1 : 0;
-			rl_printf("%d %d %d %d\n", k, 1 - cw, (k + 1) % numRoadPieces, cw_next);
+			int reverse = road_piece_scan[j].reverse ? 1 : 0;
+			int reverse_next = road_piece_scan[(j + 1) % n].reverse ? 1 : 0;
+			fprintf(fout, "%d %d %d %d\n", k, 1 - reverse, (k + 1) % numRoadPieces, reverse_next);
 		}
 	}
 
 	// Finish line.
-	rl_printf("1 0 0.0 0.15\n");
+	fprintf(fout, "1 0 0.0 0.15\n");
 
 	// Map offset and orientation.
-	rl_printf("0.0 0.0 0.0\n");
+	fprintf(fout, "0.0 0.0 0.0\n");
+
+	fclose(fout);
+
+	rl_printf("Successfully exported track description to '%s'.\n", argvp[1]);
 }
 
 static void char_write_req_cb(guint8 status, const guint8 *pdu, guint16 plen,
@@ -1124,7 +1140,7 @@ static struct {
 		"Read last message from vehicle" },
 	{ "clear-location-table",	cmd_clear_location_table,	"",	"Clear all location table entries." },
 	{ "load-location-table",	cmd_load_location_table,	"<file containing a location table in CSV format>",	"Load location table entries from the given file." },
-	{ "export-track",	cmd_export_track,	"", "Exports the scanned track such that it can be imported into tragediy." },
+	{ "export-track",	cmd_export_track,	"<output file>", "Exports the scanned track such that it can be imported into tragediy." },
 	{ NULL, NULL, NULL}
 };
 
