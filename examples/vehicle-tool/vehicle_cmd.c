@@ -192,6 +192,10 @@ static void handle_vehicle_msg_response(const uint8_t *data, uint16_t len)
                 uint8_t numbits = (m->parsing_flags & PARSEFLAGS_MASK_NUM_BITS);
                 const anki_location_table_entry_t *l = &location_table[clockwise][m->road_piece_id][m->location_id];
 
+                // Workaround to properly export intersections.
+                if (m->road_piece_id == 10 && clockwise == 1)
+                    clockwise = 0;
+
                 if (road_piece_scan[road_piece_scan_head_index].road_piece_id != m->road_piece_id || road_piece_scan[road_piece_scan_head_index].clockwise != clockwise)
                 {
                     road_piece_scan_head_index = (road_piece_scan_head_index + 1) % (sizeof(road_piece_scan) / sizeof(anki_road_piece_scan_entry_t));
